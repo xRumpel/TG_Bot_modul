@@ -1,122 +1,162 @@
 import asyncio
-from aiogram import Bot, Dispatcher, F, types
+import random
+
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+
+from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, FSInputFile
-import random
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+
 from config import TOKEN
-from gtts import gTTS
-import os
-from googletrans import Translator
+import sqlite3
+import aiohttp
+import logging
+import requests
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-translator = Translator()
 
+logging.basicConfig(level=logging.INFO)
 
-@dp.message(Command('video'))
-async def video(message: Message):
-    await bot.send_chat_action(message.chat.id, 'upload_video')
-    video = FSInputFile('video.mp4')
-    await bot.send_video(message.chat.id, video)
+button_registr = KeyboardButton(text="Регистрация в телеграм боте")
+button_exchange_rates = KeyboardButton(text="Курс валют")
+button_tips = KeyboardButton(text="Советы по экономии")
+button_finances = KeyboardButton(text="Личные финансы")
 
-@dp.message(Command('rvoice'))
-async def rvoice(message: types.Message):
-    await bot.send_chat_action(message.chat.id, 'record_audio')
-    voice = FSInputFile('voice.ogg')
+keyboards = ReplyKeyboardMarkup(keyboard=[
+   [button_registr, button_exchange_rates],
+   [button_tips, button_finances]
+   ], resize_keyboard=True)
 
+conn = sqlite3.connect('user.db')
+cursor = conn.cursor()
 
-@dp.message(Command('doc'))
-async def doc(message: Message):
-    doc = FSInputFile('tg.pdf')
-    await bot.send_document(message.chat.id, doc)
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS users (
+   id INTEGER PRIMARY KEY,
+   telegram_id INTEGER UNIQUE,
+   name TEXT,
+   category1 TEXT,
+   category2 TEXT,
+   category3 TEXT,
+   expenses1 REAL,
+   expenses2 REAL,
+   expenses3 REAL
+   )
+''')
 
+conn.commit()
 
-@dp.message(Command('audio'))
-async def audio(message: Message):
-    await bot.send_chat_action(message.chat.id, 'upload_audio')
-    audio = FSInputFile('audio.mp3')
-    await bot.send_audio(message.chat.id, audio)
-
-@dp.message(Command('training'))
-async def training(message: Message):
-    training_list = [
-        "Тренировка 1:\n1. Лягте на пол лицом вниз и поднимитесь на локтях так, чтобы тело образовало прямую линию от головы до пяток.Удерживайте положение, напрягая мышцы пресса и ягодицы",
-        "Тренировка 2:\n1. Стоитесь в положении лежа и смотрите в сторону.При этом никто не должен видеть вас.Удерживайте",
-        "Тренировка 3:\n1. выдохните"
-        ]
-    rand_tr = random.choice(training_list)
-    await message.answer(f"Это ваша мини тренировка на сегодня {rand_tr}")
-    tts = gTTS(text=rand_tr, lang='ru')
-    tts.save('training.ogg')
-    audio = FSInputFile('training.ogg')
-    await bot.send_voice(message.chat.id, audio)
-    os.remove('training.ogg')
-
-
-@dp.message(Command('voice'))
-async def voice(message: Message):
-    voice = FSInputFile('voice.ogg')
-    await message.answer_voice(voice)
-
-
-
+class FinancesForm(StatesGroup):
+   category1 = State()
+   expenses1 = State()
+   category2 = State()
+   expenses2 = State()
+   category3 = State()
+   expenses3 = State()
 
 
 @dp.message(Command('start'))
-async def start(message: Message):
-    await message.answer('Этот бот умеет выполнять команды: \n /start - запуск бота \n /help - помощь')
+async def send_start(message: Message):
+   await message.answer("Привет! Я ваш личный финансовый помощник. Выберите одну из опций в меню:", reply_markup=keyboards)
 
-@dp.message(Command('photo', prefix='!'))
-async def photo(message: Message):
-    list = ['https://i.pinimg.com/736x/ad/3e/c5/ad3ec54ecdcfefaa4eb5eddbd9f36555.jpg', 'https://i.pinimg.com/originals/af/1b/5d/af1b5d0bf3b2a189866925988f2f244d.jpg', 'https://www.zastavki.com/pictures/originals/2014/Nature___Seasons___Spring_Beautiful_flowers_in_the_spring_field_067765_.jpg']
-    rand_photo = random.choice(list)
-    await message.answer_photo(rand_photo, caption='это класс фотка')
+@dp.message(F.text == "Регистрация в телеграм боте")
+async def registration(message: Message):
+   telegram_id = message.from_user.id
+   name = message.from_user.full_name
+   cursor.execute('''SELECT * FROM users WHERE telegram_id = ?''', (telegram_id,))
+   user = cursor.fetchone()
+   if user:
+       await message.answer("Вы уже зарегистрированы!")
+   else:
+       cursor.execute('''INSERT INTO users (telegram_id, name) VALUES (?, ?)''', (telegram_id, name))
+       conn.commit()
+       await message.answer("Вы успешно зарегистрированы!")
 
-@dp.message(F.photo)
-async def aitext(message: Message):
-    list = ['ого какая фотка', ' что это такое', 'не отправляй мне это']
-    rand_answ = random.choice(list)
-    await message.answer(rand_answ)
-    await bot.download(message.photo[-1], destination=f'tmp/{message.photo[-1].file_id}.jpg')
+@dp.message(F.text == "Курс валют")
+async def exchange_rates(message: Message):
+   url = "https://v6.exchangerate-api.com/v6/09edf8b2bb246e1f801cbfba/latest/USD"
+   try:
+       response = requests.get(url)
+       data = response.json()
+       if response.status_code != 200:
+           await message.answer("Не удалось получить данные о курсе валют!")
+           return
+       usd_to_rub = data['conversion_rates']['RUB']
+       eur_to_usd = data['conversion_rates']['EUR']
 
+       euro_to_rub = eur_to_usd * usd_to_rub
 
-@dp.message(F.text == 'Что такое ИИ')
-async def aitext(message: Message):
-    await message.answer('Это искусственный интеллект, который может вычислять настоящее время.')
-
-
-@dp.message(Command('help'))
-async def help(message: Message):
-    await message.answer('Этот бот умеет выполнять команды: \n /start - запуск бота \n /help - помощь')
-
-
-
-@dp.message(CommandStart())
-async def start(message: Message):
-   await message.answer(f'Привет, {message.from_user.full_name}')
-
-@dp.message()
-async def translate_message(message: types.Message):
-    translated = translator.translate(message.text, dest='en')
-    await message.answer(f'Translation: {translated.text}')
-
-@dp.message()
-async def start(message: Message):
-    if message.text.lower() == 'тест':
-        await message.answer('Тест пройден')
+       await message.answer(f"1 USD - {usd_to_rub:.2f}  RUB\n"
+                            f"1 EUR - {euro_to_rub:.2f}  RUB")
 
 
+   except:
+       await message.answer("Произошла ошибка")
 
+@dp.message(F.text == "Советы по экономии")
+async def send_tips(message: Message):
+   tips = [
+       "Совет 1: Ведите бюджет и следите за своими расходами.",
+       "Совет 2: Откладывайте часть доходов на сбережения.",
+       "Совет 3: Покупайте товары по скидкам и распродажам."
+   ]
+   tip = random.choice(tips)
+   await message.answer(tip)
 
+@dp.message(F.text == "Личные финансы")
+async def finances(message: Message, state: FSMContext):
+   await state.set_state(FinancesForm.category1)
+   await message.reply("Введите первую категорию расходов:")
 
+@dp.message(FinancesForm.category1)
+async def finances(message: Message, state: FSMContext):
+   await state.update_data(category1 = message.text)
+   await state.set_state(FinancesForm.expenses1)
+   await message.reply("Введите расходы для категории 1:")
 
+@dp.message(FinancesForm.expenses1)
+async def finances(message: Message, state: FSMContext):
+   await state.update_data(expenses1 = float(message.text))
+   await state.set_state(FinancesForm.category2)
+   await message.reply("Введите вторую категорию расходов:")
 
+@dp.message(FinancesForm.category2)
+async def finances(message: Message, state: FSMContext):
+   await state.update_data(category2 = message.text)
+   await state.set_state(FinancesForm.expenses2)
+   await message.reply("Введите расходы для категории 2:")
 
+@dp.message(FinancesForm.expenses2)
+async def finances(message: Message, state: FSMContext):
+   await state.update_data(expenses2 = float(message.text))
+   await state.set_state(FinancesForm.category3)
+   await message.reply("Введите третью категорию расходов:")
+
+@dp.message(FinancesForm.category3)
+async def finances(message: Message, state: FSMContext):
+   await state.update_data(category3 = message.text)
+   await state.set_state(FinancesForm.expenses3)
+   await message.reply("Введите расходы для категории 3:")
+
+@dp.message(FinancesForm.expenses3)
+async def finances(message: Message, state: FSMContext):
+   data = await state.get_data()
+   telegarm_id = message.from_user.id
+   cursor.execute('''UPDATE users SET category1 = ?, expenses1 = ?, category2 = ?, expenses2 = ?, category3 = ?, expenses3 = ? WHERE telegram_id = ?''',
+                  (data['category1'], data['expenses1'], data['category2'], data['expenses2'], data['category3'], float(message.text), telegarm_id))
+   conn.commit()
+   await state.clear()
+
+   await message.answer("Категории и расходы сохранены!")
 
 
 async def main():
-    await dp.start_polling(bot)
+   await dp.start_polling(bot)
 
-
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == '__main__':
+   asyncio.run(main())
